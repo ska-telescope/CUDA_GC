@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10.2)
 
-#! Base direct fourier transform project
+#! Base gain calibration project
 project(gaincalibration CXX CUDA)
 
 if ("${CMAKE_C_COMPILER_ID}" MATCHES ".*Clang.*" OR "${CMAKE_C_COMPILER_ID}" STREQUAL "GNU")
@@ -20,6 +20,6 @@ set(
 	-std=c++11 -arch=sm_60 -Xptxas -v -O3 -restrict -D_FORCE_INLINES -D_DEBUG -lineinfo 
 )
 
-#! build and link dft
+#! build and link
 cuda_add_executable(gaincalibration main.cpp gain_calibration.cu)
-target_link_libraries(gaincalibration m)
+target_link_libraries(gaincalibration m cudart cublas cusolver) # maybe cublas in the future 

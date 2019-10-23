@@ -81,8 +81,6 @@ int main(int argc, char **argv)
 
 	calculate_receiver_pairs(&config, receiver_pairs);
 
-
-
 	execute_gain_calibration(&config, vis_measured, vis_predicted, gains_array, receiver_pairs);
 
 	printf(">>> INFO: GAIN GALIBRATION operations complete, exiting...\n\n");

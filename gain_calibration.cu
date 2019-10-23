@@ -34,10 +34,9 @@
 #include <math.h>
 
 #include <cuda.h>
-#include <cuda_runtime_api.h>
-#include <math_constants.h>
-#include <device_launch_parameters.h>
-#include <numeric>
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <cusolverDn.h>
 
 #include "gain_calibration.h"
 
@@ -167,10 +166,8 @@ void execute_gain_calibration(Config *config, Complex *vis_measured, Complex *vi
 		);
 		cudaDeviceSynchronize();	
 
-
 		//NOW DO THE SVD and Gauss-Newton to calculate Delat and update Gains array (G = G+DELTA)
-
-
+		execute_calibration_SVD(config, A_array);
 
 		//RESET Q AND A ARRRAY FOR NEXT CYCLE
 		CUDA_CHECK_RETURN(cudaMemset(Q_array, 0, sizeof(PRECISION) * 2 * config->num_recievers));
@@ -187,6 +184,130 @@ void execute_gain_calibration(Config *config, Complex *vis_measured, Complex *vi
 	CUDA_CHECK_RETURN(cudaFree(device_gains));
 	CUDA_CHECK_RETURN(cudaFree(device_receiver_pairs));
 	//CUDA_CHECK_RETURN(cudaFree(device_visibilities));
+}
+
+void execute_SVD(Config *config, PRECISION *d_A)
+{
+   	cusolverDnHandle_t cusolverH = NULL;
+    cudaStream_t stream = NULL;
+    gesvdjInfo_t gesvdj_params = NULL;
+
+    const int m = 2 * config->num_recievers;
+    const int n = 2 * config->num_recievers;
+    const int lda = m;
+
+    int *d_info = NULL;  /* error info */
+    int lwork = 0;       /* size of workspace */
+    double *d_work = NULL; /* devie workspace for gesvdj */
+    int info = 0;        /* host copy of error info */
+
+	/* configuration of gesvdj  */
+    const double tol = 1.e-7;
+    const int max_sweeps = 15;
+    const cusolverEigMode_t jobz = CUSOLVER_EIG_MODE_VECTOR; // compute eigenvectors.
+    const int econ = 0; /* econ = 1 for economy size */
+
+    /* numerical results of gesvdj  */
+    double residual = 0;
+    int executed_sweeps = 0;
+
+    /* step 1: create cusolver handle, bind a stream */
+    CUDA_SOLVER_CHECK_RETURN(cusolverDnCreate(&cusolverH));
+    CUDA_CHECK_RETURN(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    CUDA_SOLVER_CHECK_RETURN(cusolverDnSetStream(cusolverH, stream));
+
+	/* step 2: configuration of gesvdj */
+    CUDA_CHECK_RETURN(cusolverDnCreateGesvdjInfo(&gesvdj_params));
+
+    /* default value of tolerance is machine zero */
+    CUDA_CHECK_RETURN(cusolverDnXgesvdjSetTolerance(gesvdj_params,tol));
+
+	/* default value of max. sweeps is 100 */
+    CUDA_CHECK_RETURN(cusolverDnXgesvdjSetMaxSweeps(gesvdj_params,max_sweeps));
+
+    // Allocate device memory for U, V, S
+	PRECISION *d_U = NULL;
+	PRECISION *d_V = NULL;
+	PRECISION *d_S = NULL;
+
+	CUDA_CHECK_RETURN(cudaMalloc(&d_U, sizeof(PRECISION) * m * n));
+	CUDA_CHECK_RETURN(cudaMalloc(&d_V, sizeof(PRECISION) * m * n));
+	CUDA_CHECK_RETURN(cudaMalloc(&d_S, sizeof(PRECISION) * m));
+	CUDA_CHECK_RETURN(cudaMalloc(&d_info, sizeof(int)));
+
+	/* step 4: query workspace of SVD */
+	CUDA_CHECK_RETURN(cusolverDnDgesvdj_bufferSize(
+        cusolverH,
+        jobz, /* CUSOLVER_EIG_MODE_NOVECTOR: compute singular values only */
+              /* CUSOLVER_EIG_MODE_VECTOR: compute singular value and singular vectors */
+        econ, /* econ = 1 for economy size */
+        m,    /* nubmer of rows of A, 0 <= m */
+        n,    /* number of columns of A, 0 <= n  */
+        d_A,  /* m-by-n */
+        lda,  /* leading dimension of A */
+        d_S,  /* min(m,n) */
+              /* the singular values in descending order */
+        d_U,  /* m-by-m if econ = 0 */
+              /* m-by-min(m,n) if econ = 1 */
+        lda,  /* leading dimension of U, ldu >= max(1,m) */
+        d_V,  /* n-by-n if econ = 0  */
+              /* n-by-min(m,n) if econ = 1  */
+        lda,  /* leading dimension of V, ldv >= max(1,n) */
+        &lwork,
+        gesvdj_params));
+
+	/* step 5: compute SVD */
+	CUDA_CHECK_RETURN(cusolverDnDgesvdj(
+        cusolverH,
+        jobz,  /* CUSOLVER_EIG_MODE_NOVECTOR: compute singular values only */
+               /* CUSOLVER_EIG_MODE_VECTOR: compute singular value and singular vectors */
+        econ,  /* econ = 1 for economy size */
+        m,     /* nubmer of rows of A, 0 <= m */
+        n,     /* number of columns of A, 0 <= n  */
+        d_A,   /* m-by-n */
+        lda,   /* leading dimension of A */
+        d_S,   /* min(m,n)  */
+               /* the singular values in descending order */
+        d_U,   /* m-by-m if econ = 0 */
+               /* m-by-min(m,n) if econ = 1 */
+        lda,   /* leading dimension of U, ldu >= max(1,m) */
+        d_V,   /* n-by-n if econ = 0  */
+               /* n-by-min(m,n) if econ = 1  */
+        lda,   /* leading dimension of V, ldv >= max(1,n) */
+        d_work,
+        lwork,
+        d_info,
+        gesvdj_params));
+	cudaDeviceSynchronize();
+
+	CUDA_CHECK_RETURN(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
+	cudaDeviceSynchronize();
+
+	if ( 0 == info ){
+        printf("gesvdj converges \n");
+    }else if ( 0 > info ){
+        printf("%d-th parameter is wrong \n", -info);
+        exit(1);
+    }else{
+        printf("WARNING: info = %d : gesvdj does not converge \n", info );
+    }
+
+    CUDA_CHECK_RETURN(cusolverDnXgesvdjGetSweeps(cusolverH, gesvdj_params, &executed_sweeps));
+    CUDA_CHECK_RETURN(cusolverDnXgesvdjGetResidual(cusolverH, gesvdj_params, &residual));
+
+    printf("residual |A - U*S*V**H|_F = %E \n", residual);
+    printf("number of executed sweeps = %d \n", executed_sweeps);
+
+    /*  free resources  */
+    if (d_S    ) CUDA_CHECK_RETURN(cudaFree(d_S));
+    if (d_U    ) CUDA_CHECK_RETURN(cudaFree(d_U));
+    if (d_V    ) CUDA_CHECK_RETURN(cudaFree(d_V));
+    if (d_info ) CUDA_CHECK_RETURN(cudaFree(d_info));
+    if (d_work ) CUDA_CHECK_RETURN(cudaFree(d_work));
+
+    if (cusolverH    ) CUDA_SOLVER_CHECK_RETURN(cusolverDnDestroy(cusolverH));
+    if (stream       ) CUDA_CHECK_RETURN(cudaStreamDestroy(stream));
+    if (gesvdj_params) CUDA_SOLVER_CHECK_RETURN(cusolverDnDestroyGesvdjInfo(gesvdj_params));
 }
 
 __global__ void update_gain_calibration(const PRECISION2 *vis_measured_array, const PRECISION2 *vis_predicted_array, 
@@ -482,8 +603,6 @@ void load_visibilities(Config *config, Visibility **visibilities, Complex **vis_
 		printf(">>> UPDATE: Successfully loaded %d visibilities from file...\n\n",config->num_visibilities);
 }
 
-
-
 void save_visibilities(Config *config, Visibility *visibilities, Complex *vis_intensity)
 {
 	// Save visibilities to file
@@ -541,7 +660,16 @@ void save_visibilities(Config *config, Visibility *visibilities, Complex *vis_in
  * Check the return value of the CUDA runtime API call and exit
  * the application if the call has failed.
  */
-static void check_cuda_error_aux(const char *file, unsigned line, const char *statement, cudaError_t err)
+void check_cuda_error_aux(const char *file, unsigned line, const char *statement, cudaError_t err)
+{
+	if (err == cudaSuccess)
+		return;
+
+	printf(">>> CUDA ERROR: %s returned %s at %s : %u ",statement, file, cudaGetErrorString(err), line);
+	exit(EXIT_FAILURE);
+}
+
+void check_cuda_solver_error_aux(const char *file, unsigned line, const char *statement, cusolverStatus_t err)
 {
 	if (err == cudaSuccess)
 		return;

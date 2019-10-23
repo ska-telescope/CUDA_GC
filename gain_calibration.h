@@ -92,6 +92,8 @@ extern "C" {
 
 #define CUDA_CHECK_RETURN(value) check_cuda_error_aux(__FILE__,__LINE__, #value, value)
 
+#define CUDA_SOLVER_CHECK_RETURN(value) check_cuda_solver_error_aux(__FILE__,__LINE__, #value, value)
+
 typedef struct Config {
 	int num_visibilities;
 	const char *vis_src_file;
@@ -130,6 +132,7 @@ void calculate_receiver_pairs(Config *config, int2 *receiver_pairs);
 __global__ void update_gain_calibration(const PRECISION2 *vis_measured_array, const PRECISION2 *vis_predicted_array, 
 	const PRECISION2 *gains_array, const int2 *receiver_pairs, PRECISION *A_array, PRECISION *Q_array, const int num_recievers, const int num_baselines);
 
+void execute_calibration_SVD(Config *config, PRECISION *d_A);
 
 __device__ PRECISION2 flip_for_i(const PRECISION2 z);
 
@@ -143,7 +146,9 @@ __device__ PRECISION2 complex_subtract(const PRECISION2 z1, const PRECISION2 z2)
 
 __device__ PRECISION2 complex_conjugate(const PRECISION2 z1);
 
-static void check_cuda_error_aux(const char *file, unsigned line, const char *statement, cudaError_t err);
+void check_cuda_error_aux(const char *file, unsigned line, const char *statement, cudaError_t err);
+
+void check_cuda_solver_error_aux(const char *file, unsigned line, const char *statement, cusolverStatus_t err);
 
 #endif /* GAIN_CALIBRATION_H_ */
 
